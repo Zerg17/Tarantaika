@@ -1,5 +1,15 @@
 #include <libopencm3/usb/usbd.h>
 
+#define USB_CNTR_REG		(&MMIO32(USB_DEV_FS_BASE + 0x40))
+#define USB_CNTR_CTRM		0x8000
+#define USB_CNTR_PMAOVRM	0x4000
+#define USB_CNTR_ERRM		0x2000
+#define USB_CNTR_WKUPM		0x1000
+#define USB_CNTR_SUSPM		0x0800
+#define USB_CNTR_RESETM		0x0400
+#define USB_CNTR_SOFM		0x0200
+#define USB_CNTR_ESOFM		0x0100
+
 static const struct usb_device_descriptor dev = {
 	.bLength = USB_DT_DEVICE_SIZE,
 	.bDescriptorType = USB_DT_DEVICE,
@@ -62,4 +72,10 @@ static const struct usb_config_descriptor config = {
 	.bMaxPower = 0x32,
 
 	.interface = ifaces,
+};
+
+static const char *usb_strings[] = {
+	"AVRORA Robotics",
+	"Tarantika",
+	"V_0.0.1",
 };

@@ -20,6 +20,9 @@ volatile uint16_t u[3];
 volatile uint16_t up;
 char bufC[64];
 
+uint8_t usbd_control_buffer[128];
+usbd_device *usbd_dev;
+
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define abs(x) ((x) > 0 ? (x) : -(x))
@@ -30,20 +33,47 @@ long map(long x, long in_min, long in_max, long out_min, long out_max) {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
+struct _head{
+    uint32_t time;
+    uint16_t id;
+    uint8_t status;
+    uint8_t err;
+};
+
+union {
+    struct __attribute__((packed)) {
+        struct _head head;
+        uint16_t u[3];
+    } msg;
+    uint8_t buf[64];
+} rc;
+
+union{
+    struct __attribute__((packed)) {
+        struct _head head;
+        int16_t speed;   // Скорость от -10000 до 10000
+        int16_t angle;  // Угол руля от -10000 .. 10000
+        uint16_t light;  // 0-Габариты 1-левый поворотник 2-правый поворотник
+        uint16_t sysa;   // 0-Автономное управление
+        uint16_t sysb;   // 0-Тормоз 1-рекупирация
+    } msg;
+    uint8_t buf[64];
+} control;
+
 union {
     struct {
-        int16_t speed;    // Скорость от -10000 до 10000
-        uint16_t light;   // 0-Габариты 1-левый поворотник 2-правый поворотник
-        uint16_t sysa;    // 0-Автономное управление
-        uint16_t sysb;    // 0-Тормоз 1-рекупирация
+        int16_t speed;   // Скорость от -10000 до 10000
+        uint16_t light;  // 0-Габариты 1-левый поворотник 2-правый поворотник
+        uint16_t sysa;   // 0-Автономное управление
+        uint16_t sysb;   // 0-Тормоз 1-рекупирация
     } msg;
     uint8_t buf[64];
 } packMotor;
 
 union {
     struct {
-        int16_t angle;   // Угол руля от -10000 .. 10000
-        uint16_t sysa;   // 0-Автономное управление
+        int16_t angle;  // Угол руля от -10000 .. 10000
+        uint16_t sysa;  // 0-Автономное управление
     } msg;
     uint8_t buf[64];
 } packSteering;
@@ -86,93 +116,112 @@ void extiInit() {
     nvic_enable_irq(NVIC_EXTI15_10_IRQ);
 }
 
-void sendPacketMotor() { // Передача моторному блоку
-    uint16_t crc = 211;
-    uint8_t data[sizeof(packMotor.msg) + 3] = {0x55, 0x55};
-    for (uint16_t i = 0; i < sizeof(packMotor.msg); i++) {
-        data[i + 2] = packMotor.buf[i];
-        crc += packMotor.buf[i] * 211;
-        crc ^= crc >> 8;
-    }
-    data[sizeof(data) - 1] = crc;
-
-    DMA_CCR(DMA1, DMA_CHANNEL7) &= ~DMA_CCR_EN;
-    DMA_CMAR(DMA1, DMA_CHANNEL7) = (uint32_t)data;
-    DMA_CNDTR(DMA1, DMA_CHANNEL7) = sizeof(data);
-    DMA_CCR(DMA1, DMA_CHANNEL7) |= DMA_CCR_EN;
-    while (DMA_CNDTR(DMA1, DMA_CHANNEL7))  // Ожидание окончания передачи чтобы не накладывалось (хз есть польза или нет)
-        ;
-}
-
-void sendPacketSteering() { // Передача вескному блоку
-    uint16_t crc = 211;
-    uint8_t data[sizeof(packSteering.msg) + 3] = {0x55, 0x55};
-    for (uint16_t i = 0; i < sizeof(packSteering.msg); i++) {
-        data[i + 2] = packSteering.buf[i];
-        crc += packSteering.buf[i] * 211;
-        crc ^= crc >> 8;
-    }
-    data[sizeof(data) - 1] = crc;
-
-    DMA_CCR(DMA1, DMA_CHANNEL2) &= ~DMA_CCR_EN;
-    DMA_CMAR(DMA1, DMA_CHANNEL2) = (uint32_t)data;
-    DMA_CNDTR(DMA1, DMA_CHANNEL2) = sizeof(data);
-    DMA_CCR(DMA1, DMA_CHANNEL2) |= DMA_CCR_EN;
-    while (DMA_CNDTR(DMA1, DMA_CHANNEL2)) // Ожидание окончания передачи чтобы не накладывалось (хз есть польза или нет)
-        ;
-}
-
-int main(void) {
-    clock_setup();
-    gpio_setup();
-    usart_setup();
-    extiInit();
-
-    // sprintf(bufC, "\n");
-    uPD("\nTarantaika start...\n");// Для определения что за прошивка
-
-    USART_BRR(USART2) = rcc_apb1_frequency / 19200 + 1; // Скорость юарта 
+void protocolInit() {
+    USART_BRR(USART2) = rcc_apb1_frequency / 19200 + 1;
     USART_CR1(USART2) |= USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
     USART_CR3(USART2) |= USART_CR3_DMAT;
     DMA_CPAR(DMA1, DMA_CHANNEL7) = (uint32_t)&USART_DR(USART2);
     DMA_CCR(DMA1, DMA_CHANNEL7) = DMA_CCR_DIR | DMA_CCR_MINC | DMA_CCR_EN;
 
-    USART_BRR(USART3) = rcc_apb1_frequency / 19200 + 1; // Скорость юарта 
+    USART_BRR(USART3) = rcc_apb1_frequency / 19200 + 1;
     USART_CR1(USART3) |= USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
     USART_CR3(USART3) |= USART_CR3_DMAT;
     DMA_CPAR(DMA1, DMA_CHANNEL2) = (uint32_t)&USART_DR(USART3);
     DMA_CCR(DMA1, DMA_CHANNEL2) = DMA_CCR_DIR | DMA_CCR_MINC | DMA_CCR_EN;
+}
 
-    // sprintf(bufC, "WHOAMI : 0x%X\n");
-    // uPD(bufC);
+uint8_t crcCalc(uint8_t* buf, uint16_t len) {
+    uint16_t crc = 211;
+    for (uint16_t i = 0; i < len; i++) {
+        buf[i + 2] = buf[i];
+        crc += buf[i] * 211;
+        crc ^= crc >> 8;
+    }
+    return crc;
+}
+
+void sendPacketMotor() {  // Передача моторному блоку
+    uint8_t data[sizeof(packMotor.msg) + 3] = {0x55, 0x55};
+    data[sizeof(data) - 1] = crcCalc(packMotor.buf, sizeof(packMotor.msg));
+    DMA_CCR(DMA1, DMA_CHANNEL7) &= ~DMA_CCR_EN;
+    DMA_CMAR(DMA1, DMA_CHANNEL7) = (uint32_t)data;
+    DMA_CNDTR(DMA1, DMA_CHANNEL7) = sizeof(data);
+    DMA_CCR(DMA1, DMA_CHANNEL7) |= DMA_CCR_EN;
+    while (DMA_CNDTR(DMA1, DMA_CHANNEL7))
+        ;
+}
+
+void sendPacketSteering() {  // Передача вескному блоку
+    uint8_t data[sizeof(packSteering.msg) + 3] = {0x55, 0x55};
+    data[sizeof(data) - 1] =
+        crcCalc(packSteering.buf, sizeof(packSteering.msg));
+    DMA_CCR(DMA1, DMA_CHANNEL2) &= ~DMA_CCR_EN;
+    DMA_CMAR(DMA1, DMA_CHANNEL2) = (uint32_t)data;
+    DMA_CNDTR(DMA1, DMA_CHANNEL2) = sizeof(data);
+    DMA_CCR(DMA1, DMA_CHANNEL2) |= DMA_CCR_EN;
+    while (DMA_CNDTR(DMA1, DMA_CHANNEL2))
+        ;
+}
+
+void dataRx(usbd_device *usbd_dev, uint8_t ep){
+	usbd_ep_read_packet(usbd_dev, 0x01, control.buf, 64);
+    usbd_ep_write_packet(usbd_dev, 0x82, &rc.buf, sizeof(rc.msg));
+}
+
+void usbdev_set_config(usbd_device *usbd_dev, uint16_t wValue){
+	usbd_ep_setup(usbd_dev, 0x01, USB_ENDPOINT_ATTR_BULK, 64, dataRx);
+}
+
+__attribute__((constructor)) void systemInit() {
+    clock_setup();
+    gpio_setup();
+    usart_setup();
+    extiInit();
+    protocolInit();
+    protocolInit();
     systick_setup();
+
+    usbd_dev = usbd_init(&st_usbfs_v1_usb_driver, &dev, &config, usb_strings, 3, usbd_control_buffer, sizeof(usbd_control_buffer));
+	usbd_register_set_config_callback(usbd_dev, usbdev_set_config);
+    nvic_enable_irq(NVIC_USB_LP_CAN_RX0_IRQ);
+    *USB_CNTR_REG |= USB_CNTR_CTRM | USB_CNTR_RESETM | USB_CNTR_WKUPM | USB_CNTR_SUSPM;
+}
+
+int main(void) {
+    uPD("\nTarantaika start...\n");  // Для определения что за прошивка
+
     while (1) {
-        memset(packMotor.buf, 0, 64);                                     // По умолчанию пакет пуст и все в нулях
+        memset(packMotor.buf, 0, 64);  // По умолчанию пакет пуст и все в нулях
         memset(packSteering.buf, 0, 64);
-        if (activ) {                                                      // Если пульт активен
-            packMotor.msg.sysa |= (1 << 0);                               // Говорит релейке что пульт жив
-            if (u[1] > 1550) {                                            // Если газ больше мз товключить фары и подать скорость
+        if (activ) {  // Если пульт активен
+            packMotor.msg.sysa |= (1 << 0);  // Говорит релейке что пульт жив
+            if (u[1] >
+                1550) {  // Если газ больше мз товключить фары и подать скорость
                 packMotor.msg.light |= (1 << 0);
                 packMotor.msg.speed =
                     constrain(map(u[1], 1550, 2000, 0, 10000), 0, 10000);
             }
-            if (u[1] < 1400) packMotor.msg.sysb |= (1 << 1);              // Включение рекупирации
-            if (u[1] < 1200) {                                            // Включение тормоза
+            if (u[1] < 1400)
+                packMotor.msg.sysb |= (1 << 1);  // Включение рекупирации
+            if (u[1] < 1200) {  // Включение тормоза
                 packMotor.msg.sysb |= (1 << 0);
                 packMotor.msg.light |= (1 << 3);
             }
-            if (u[2] > 1500) packMotor.msg.speed = -packMotor.msg.speed;  // Если назад то инвертируем скорость
+            if (u[2] > 1500)
+                packMotor.msg.speed =
+                    -packMotor.msg.speed;  // Если назад то инвертируем скорость
 
-            if (u[0] > 1700) packMotor.msg.light |= (1 << 2);             // Поворотники
+            if (u[0] > 1700) packMotor.msg.light |= (1 << 2);  // Поворотники
             if (u[0] < 1300) packMotor.msg.light |= (1 << 1);
-            packSteering.msg.sysa |= (1 << 0);                            // Говорит веску что пульт жив 
+            packSteering.msg.sysa |= (1 << 0);  // Говорит веску что пульт жив
             packSteering.msg.angle =
-                constrain(map(u[0], 1050, 1950, -10000, 10000), -10000, 10000);  // Значения на пульт
+                constrain(map(u[0], 1050, 1950, -10000, 10000), -10000,
+                          10000);  // Значения на пульт
         }
         sendPacketMotor();  // Отправка
         sendPacketSteering();
-        // sprintf(bufC, "%d %d %d\n", u[0], u[1], u[2]);  // Тут значния с пульта можно дебажить юарт 1
-        // uPD(bufC);
+        // sprintf(bufC, "%d %d %d\n", u[0], u[1], u[2]);  // Тут значния с
+        // пульта можно дебажить юарт 1 uPD(bufC);
     }
 }
 
@@ -198,7 +247,7 @@ void exti15_10_isr() {
         exti_reset_request(EXTI12);
         if (!gpio_get(GPIOB, GPIO12)) {
             uint16_t uz = (sysTime - ul[0]) / 72;
-            if (uz > 800 && uz < 2200) {          // Страшный хрень которая вроде фиксит то что система сходит сума от шумов
+            if (uz > 800 && uz < 2200) {
                 u[0] = uz;
                 up &= 0xFFF0;
             }
@@ -229,4 +278,8 @@ void exti15_10_isr() {
         } else
             ul[2] = sysTime;
     }
+}
+
+void usb_lp_can_rx0_isr(){
+	usbd_poll(usbd_dev);
 }
