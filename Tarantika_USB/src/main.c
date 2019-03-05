@@ -6,10 +6,12 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/spi.h>
 #include <libopencm3/stm32/usart.h>
+#include <libopencm3/usb/usbd.h>
 #include <stdlib.h>
-#include <strings.h>
+#include <string.h>
 #include "delay.h"
 #include "uart.h"
+#include "usb_struct.h"
 
 volatile uint32_t millis;
 volatile uint8_t activ = 0;
@@ -30,21 +32,21 @@ long map(long x, long in_min, long in_max, long out_min, long out_max) {
 
 union {
     struct {
-        int16_t speed;
-        uint16_t light;
-        uint16_t sysa;
-        uint16_t sysb;
+        int16_t speed;    // Скорость от -10000 до 10000
+        uint16_t light;   // 0-Габариты 1-левый поворотник 2-правый поворотник
+        uint16_t sysa;    // 0-Автономное управление
+        uint16_t sysb;    // 0-Тормоз 1-рекупирация
     } msg;
     uint8_t buf[64];
-} packMotor;            // Пакет для релейного блока
+} packMotor;
 
 union {
     struct {
-        int16_t angle;
-        uint16_t sysa;
+        int16_t angle;   // Угол руля от -10000 .. 10000
+        uint16_t sysa;   // 0-Автономное управление
     } msg;
     uint8_t buf[64];
-} packSteering;         // Пакает для веска
+} packSteering;
 
 void clock_setup() {
     rcc_clock_setup_in_hse_8mhz_out_72mhz();
